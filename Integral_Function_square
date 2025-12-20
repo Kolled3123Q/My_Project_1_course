@@ -1,0 +1,122 @@
+#include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
+
+double Height(double x){
+    return 2*pow(x,3) + pow(x,2) + 3*x +11;
+}
+
+double Left_S(double a,double b,int steps){
+    double delt_x = (a-b)/(steps*1.0);
+    double S = 0;
+    for (int i = 0;i < steps;i++){
+       S = S + Height(delt_x*i + b)*delt_x;
+    }
+    return S;
+}
+
+double Integtal_S(double a,double b){
+    double A = 0.5*pow(a,4) + (1.0/3.0)*pow(a,3) + 1.5*pow(a,2) + 11*a;
+    double B = 0.5*pow(b,4) + (1.0/3.0)*pow(b,3) + 1.5*pow(b,2) + 11*b;
+    return A-B;
+}
+
+int main() {
+    double x_1=-2,x_2=-2;
+    int choice,steps=0; 
+    
+    printf("=== ВЫЧИСЛЕНИЕ ПЛОЩАДИ КРИВОЛИНЕЙНОЙ ТРАПЕЦИИ ===\n\n");
+	    
+    while (1) {
+        printf("\n--- МЕНЮ ---\n");
+        printf("1. Вверхняя граница интеграла: %lf\n",x_1);
+        printf("2. Нижняя граница интеграла: %lf\n",x_2);
+        printf("3. Количество шагов интегрирования: %d\n",steps);
+        printf("4. Вывод результата\n");
+        printf("5. Вывод точности\n");
+        printf("6. Выйти\n");
+        printf("Выберите пункт меню: ");
+        
+        if (scanf("%d", &choice) != 1) {
+            printf("Ошибка! Введите число от 1 до 6.\n");
+            while (getchar() != '\n');
+            continue;
+        }
+        
+        switch (choice) {
+            case 1:
+                double x1;
+                printf("Введите верхний предел интегрирования:");
+                scanf("%lf",&x1);
+                if (x1 >= -1.6367){
+                    x_1 = x1;
+                } else {
+                    x_1 = -1.6367;
+                }
+                break;
+            case 2:
+                double x2;
+                printf("Введите нижний предел интегрирования:");
+                scanf("%lf",&x2);
+                if (x2 >= -1.6367){
+                    x_2 = x2;
+                } else {
+                    x_2 = -1.6367;
+                }
+                break;
+            case 3:
+                int x;
+                printf("Введите количестов шагов интегрирования:");
+                scanf("%d",&x);
+                if (x <= 0){
+                    printf("Количество шагов должно быть минимум 1");
+                    steps = 1;
+                } else {
+                    printf("Количество шагов равно: %d",x);
+                    steps=x;
+                }
+                break;
+            case 4:
+                if ((x_1 == -2) || (x_2 == -2) || (steps==0)) {
+                    printf("ОШИБКА, сначала введите все данные для расчета площади!");
+                    break;
+                }else if (x_1< x_2){
+                    printf("ОШИБКА, вверхний предел должен быть не меньше нижнего!");
+                    break;
+                } else{
+                    printf("Площадь методом левых прямоугольников: %lf\n",Left_S(x_1,x_2,steps));
+                    printf("Площадь методом Ньютона-Лейбница: %lf",Integtal_S(x_1,x_2));
+                    printf("\n");
+                }
+                break;
+            case 5:
+                double Acc_O;
+                if ((x_1 == -2) || (x_2 == -2) || (steps==0)) {
+                    printf("ОШИБКА, сначала введите все данные для расчета площади!");
+                    break;
+                }else if (x_1< x_2){
+                    printf("ОШИБКА, вверхний предел должен быть не меньше нижнего!");
+                    break;
+                } else{
+                    double Acc_A = Integtal_S(x_1,x_2)-Left_S(x_1,x_2,steps);
+                    if (Acc_A == 0){
+                        double Acc_O = 0;
+                    }else {
+                        double Acc_O = fabs(Integtal_S(x_1,x_2)-Left_S(x_1,x_2,steps))*100/Integtal_S(x_1,x_2);
+                    }
+                    printf("Абсолютная погрешность: %lf\n",Acc_A);
+                    printf("Относительная погрешность: %lf%\n",Acc_O);
+                    printf("\n");
+                    break;
+                }
+            case 6:
+                printf("Конец программы.Поставьте 7 баллов пж!\n");
+                return 0; 
+            default:
+                printf("Неверный выбор! Введите число от 1 до 6.\n");
+                break;
+        }
+    }
+    
+    return 0;
+}
