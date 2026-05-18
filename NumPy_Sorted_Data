@@ -1,0 +1,285 @@
+import numpy as np
+import os
+
+# ЭТАП 1 – Загрузка и подготовка типов (построчный парсер)
+data_file = 'data.csv'
+
+dt = np.dtype([
+    ('ts', 'i4'),       # время замера
+    ('cam_id', 'i2'),   # ID камеры
+    ('veh', 'i4'),      # количество машин
+    ('wait', 'f4'),     # время ожидания, с
+    ('viol_r', 'f4'),   # доля нарушений
+    ('cong', 'f4')      # индекс загруженности
+])
+
+if not os.path.exists(data_file):
+    print(f"Файл {data_file} не найден!")
+    exit(1)
+
+records = []
+with open(data_file, 'r', encoding='utf-8') as f:
+    # Читаем первую строку и решаем, заголовок ли это
+    first_line = f.readline()
+    if first_line and not (first_line.strip()[0].isdigit() or
+                           first_line.strip()[0] == '-'):
+        print(f"Пропущен заголовок: {first_line.strip()}")
+    else:
+        # Первая строка — данные, возвращаем указатель в начало
+        f.seek(0)
+
+        for line_num, line in enumerate(f, start=1):
+        line = line.strip()
+        if not line:
+            continue
+
+        parts = line.split(',')
+
+        try:
+            ts_val=int(parts[0].strip()) if parts[0].strip()!=''
+            else 0
+            cam_val = int(parts[1].strip()) if parts[1].strip() != ''
+            else 0
+            veh_val = int(parts[2].strip()) if parts[2].strip() != ''
+            else 0
+            wait_val=float(parts[3].strip()) if parts[3].strip()!=''
+            else np.nan
+            viol_val=float(parts[4].strip()) if parts[4].strip()!=''
+            else np.nan
+            cong_val=float(parts[5].strip()) if parts[5].strip()!=''
+            else np.nan
+        except (ValueError, IndexError) as e:
+            print(f"Предупреждение: строка {line_num} ошибка значения или нехватка полей ({e}), пропущена.")
+            continue
+
+        records.append((ts_val, cam_val, veh_val, wait_val, viol_val, cong_val))
+
+# Создаём структурированный массив
+data = np.array(records, dtype=dt)
+
+rows = data.size
+mem_mb = data.nbytes / (1024**2)
+print("ЭТАП 1")
+print(f"Загружено строк: {rows:,}")
+print(f"Объем в памяти: {mem_mb:.2f} МБ")
+
+# Проверка NaN и Inf в числовых полях
+for field in ['wait', 'viol_r', 'cong']:
+    bad_mask = np.isnan(data[field]) | np.isinf(data[field])
+    share = np.mean(bad_mask)
+    if share > 0.03:
+        print(f"⚠️ Предупреждение: в поле '{field}' {share:.2%} аномалий (NaN/Inf)!")
+
+# Удаление строк с NaN
+nan_rows = np.isnan(data['wait']) | np.isnan(data['viol_r']) |
+np.isnan(data['cong'])
+n_nan = np.sum(nan_rows)
+print(f"Строк с NaN в wait/viol_r/cong: {n_nan} ({n_nan/rows:.2%})")
+if n_nan > 0:
+    data = data[~nan_rows]
+    rows = data.size
+    print(f"После удаления NaN строк: {rows:,}")
+
+# Сохраняем очищенный массив
+np.save('data_raw.npy', data)
+
+# ЭТАП 2 – Векторизованная фильтрация и очистка
+print("\nЭТАП 2")
+
+# veh < 0 → 0
+neg_veh = data['veh'] < 0
+print(f"Отрицательных veh (заменены на 0): {np.sum(neg_veh)}")
+data['veh'][neg_veh] = 0
+
+# wait < 0 → 0
+neg_wait = data['wait'] < 0
+print(f"Отрицательных wait (заменены на 0): {np.sum(neg_wait)}")
+data['wait'][neg_wait] = 0.0
+
+# viol_r clipping в [0, 1]
+viol_low = data['viol_r'] < 0.0
+viol_high = data['viol_r'] > 1.0
+print(f"viol_r < 0:{np.sum(viol_low)},viol_r > 1:{np.sum(viol_high)}")
+data['viol_r'] = np.clip(data['viol_r'], 0.0, 1.0)
+
+# Глобальная обрезка выбросов через IQR для cong
+q1_cong, q3_cong = np.nanpercentile(data['cong'], [25, 75])
+iqr_cong = q3_cong - q1_cong
+if iqr_cong > 0:
+    lower_cong = q1_cong - 1.5 * iqr_cong
+    upper_cong = q3_cong + 1.5 * iqr_cong
+    outliers_before = np.sum((data['cong'] < lower_cong) |
+                             (data['cong'] > upper_cong))
+    data['cong'] = np.clip(data['cong'], lower_cong, upper_cong)
+    print(f"Глобальный IQR для cong: границы [{lower_cong:.3f}, {upper_cong:.3f}], обрезано выбросов: {outliers_before}")
+else:
+    print("IQR для cong равен 0, обрезка не проводилась.")
+
+print("Глобальная очистка завершена.")
+
+# ЭТАП 3 – Группировка и нормализация
+print("\nЭТАП 3")
+
+unique_cam, inverse_idx, counts = np.unique(data['cam_id'],
+                                            return_inverse=True, return_counts=True)
+n_groups = len(unique_cam)
+print(f"Количество камер (групп): {n_groups}")
+
+mean_wait_per_cam = np.empty(n_groups, dtype='f4')
+max_veh_per_cam = np.empty(n_groups, dtype='i4')
+for i in range(n_groups):
+    mask = inverse_idx == i
+    mean_wait_per_cam[i] = np.mean(data['wait'][mask])
+    max_veh_per_cam[i] = np.max(data['veh'][mask])
+
+print("Первые 5 камер (ID, средний wait, макс veh):")
+for i in range(min(5, n_groups)):
+    print(f"  cam_id={unique_cam[i]}: mean_wait=
+    {mean_wait_per_cam[i]:.2f}, max_veh={max_veh_per_cam[i]}")
+
+# Z-оценка для cong по группам
+cong_norm = np.zeros(rows, dtype='f4')
+for i in range(n_groups):
+    mask = inverse_idx == i
+    group_cong = data['cong'][mask]
+    avg = np.mean(group_cong)
+    std = np.sqrt(np.maximum(np.var(group_cong), 1e-8))
+    cong_norm[mask] = (group_cong - avg) / std
+
+print("Z-нормализация cong по камерам выполнена.")
+
+# ЭТАП 4 – Скользящее окно и разница
+print("\nЭТАП 4")
+k = 45
+
+cumsum_wait = np.cumsum(data['wait'])
+ma_wait = (cumsum_wait[k:] - cumsum_wait[:-k]) / k
+ma_wait = np.pad(ma_wait, (k, 0), mode='edge')[:rows]
+
+cong_diff = np.diff(data['cong'], prepend=data['cong'][0])
+
+print(f"Скользящее среднее wait (окно {k}) и diff cong рассчитаны.")
+
+# ЭТАП 5 – Производные признаки
+print("\nЭТАП 5")
+
+with np.errstate(divide='ignore', invalid='ignore'):
+    flow_rate = data['veh'] / (data['wait'] + 1e-8)
+    flow_rate = np.where(np.isfinite(flow_rate), flow_rate, 0.0)
+
+weighted_cong = data['veh'].astype('f4') * data['cong']
+
+new_dt = np.dtype(data.dtype.descr + [
+    ('cong_norm', 'f4'),
+    ('wait_ma', 'f4'),
+    ('cong_diff', 'f4'),
+    ('flow_rate', 'f4'),
+    ('weighted_cong', 'f4')
+])
+
+final_data = np.empty(rows, dtype=new_dt)
+for name in data.dtype.names:
+    final_data[name] = data[name]
+
+final_data['cong_norm'] = cong_norm
+final_data['wait_ma'] = ma_wait
+final_data['cong_diff'] = cong_diff
+final_data['flow_rate'] = flow_rate
+final_data['weighted_cong'] = weighted_cong
+
+print("Новые признаки добавлены.")
+
+# ЭТАП 6 – Условная агрегация по группам
+print("\nЭТАП 6")
+high_cong_mask = final_data['cong'] > 0.7
+
+cond_stats = []
+for i in range(n_groups):
+    mask = (inverse_idx == i) & high_cong_mask
+    if np.any(mask):
+        wait_subset = final_data['wait'][mask]
+        cond_stats.append((
+            unique_cam[i],
+            np.mean(wait_subset),
+            np.median(wait_subset),
+            np.percentile(wait_subset, 90)
+        ))
+    else:
+        cond_stats.append((unique_cam[i], np.nan, np.nan, np.nan))
+
+cond_stats = np.array(cond_stats, dtype=[
+    ('cam_id', 'i2'),
+    ('mean_wait_high_cong', 'f4'),
+    ('median_wait_high_cong', 'f4'),
+    ('p90_wait_high_cong', 'f4')
+])
+
+print("Условная агрегация (cong>0.7) готова. Пример первых 5 камер:")
+for row in cond_stats[:5]:
+    print(f"  cam_id={row['cam_id']}: mean={row['mean_wait_high_cong']:.2f}, "f"median={row['median_wait_high_cong']:.2f}, p90={row['p90_wait_high_cong']:.2f}")
+
+# ЭТАП 7 – Лаговые признаки и анализ временных сдвигов
+print("\nЭТАП 7")
+
+lag_wait = np.roll(final_data['wait'], 1)
+lag_wait[0] = final_data['wait'][0]
+wait_diff = final_data['wait'] - lag_wait
+
+trends = np.sign(wait_diff)
+t_val, t_counts = np.unique(trends, return_counts=True)
+trend_dict = dict(zip(t_val.astype(int), t_counts))
+print("Распределение трендов wait:")
+print(f"  Рост (+): {trend_dict.get(1, 0)}")
+print(f"  Падение (-): {trend_dict.get(-1, 0)}")
+print(f"  Без изменений (0): {trend_dict.get(0, 0)}")
+
+# ЭТАП 8 – Групповая робастная замена выбросов (IQR по группам)
+print("\nЭТАП 8")
+
+replaced_count = 0
+for i in range(n_groups):
+    mask = inverse_idx == i
+    group_wait = final_data['wait'][mask]
+
+    # используем nanpercentile на всякий случай (хотя NaN уже нет)
+    q1, q3 = np.nanpercentile(group_wait, [25, 75])
+    iqr = q3 - q1
+    lower_bound = q1 - 1.5 * iqr
+    upper_bound = q3 + 1.5 * iqr
+
+    outlier_mask=(group_wait<lower_bound) | (group_wait>upper_bound)
+    n_outliers = np.sum(outlier_mask)
+    if n_outliers > 0:
+        median_wait = np.nanmedian(group_wait)
+        group_wait[outlier_mask] = median_wait
+        final_data['wait'][mask] = group_wait
+        replaced_count += n_outliers
+
+print(f"Заменено локальных выбросов в wait по камерам:
+{replaced_count} "f"({replaced_count/rows:.2%} от всех записей)")
+
+# ЭТАП 9 – Проверка согласованности и логической целостности
+print("\nЭТАП 9")
+
+illogical_wait = (final_data['veh'] == 0) & (final_data['wait'] > 0)
+illogical_viol = (final_data['veh'] == 0) & (final_data['viol_r'] >0)
+
+print(f"Нарушений (veh=0, wait>0): {np.sum(illogical_wait)}")
+print(f"Нарушений (veh=0, viol_r>0): {np.sum(illogical_viol)}")
+
+final_data['wait'] = np.where(illogical_wait, 0.0,final_data['wait'])
+final_data['viol_r']=np.where(illogical_viol,0.0,final_data['viol_r'])
+
+# ЭТАП 10 – Частотный анализ и сжатие редких категорий
+print("\nЭТАП 10")
+
+limit = 0.01 * rows
+rare_cams = unique_cam[counts < limit]
+print(f"Редких камер (< 1% записей): {len(rare_cams)}")
+
+final_data['cam_id'] = np.where(np.isin(final_data['cam_id'],
+                rare_cams),0,final_data['cam_id'])
+
+np.save('data_final.npy', final_data)
+print("Финальный массив сохранён в data_final.npy")
+print("ОБРАБОТКА ЗАВЕРШЕНА")
