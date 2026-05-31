@@ -1,0 +1,338 @@
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import (
+    FigureCanvasTkAgg, NavigationToolbar2Tk
+)
+import os
+
+# ======================== КОНФИГУРАЦИЯ ========================
+VARIANT = 49
+CSV_FILE = "data.csv"          # исходный файл из лаб.6
+RNG_SEED = 49
+
+# ======================== НАСТРОЙКА СТИЛЕЙ ========================
+# Цветовая схема (тёмная тема)
+BG_COLOR = "#1e1e2e"           # основной фон окна
+FRAME_BG = "#2a2a3a"           # фон панелей
+BUTTON_BG = "#0f0f1a"          # кнопки
+BUTTON_ACTIVE = "#3a3a5a"      # активная кнопка
+TEXT_COLOR = "#ffffff"         # цвет текста
+ACCENT_COLOR = "#4ecdc4"       # бирюзовый акцент
+SECOND_ACCENT = "#f9a826"      # оранжевый акцент
+
+# Настройка шрифтов и matplotlib
+plt.rcParams["font.sans-serif"] = ["Segoe UI", "Arial", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False
+sns.set_theme(style="darkgrid")        # тёмная сетка seaborn
+sns.set_palette("muted")               # приглушённые цвета
+
+# Глобальные переменные
+df_raw = None
+fig = Figure(figsize=(9, 5.5), dpi=100)
+canvas = None
+current_chart = "line"
+
+# Переменные виджетов
+var_cam = None
+var_agg = None
+var_resample = None
+var_smoothing = None
+
+# ======================== ЗАГРУЗКА, ОЧИСТКА И РАСШИРЕНИЕ ========================
+def generate_demo_data():
+    """Генерация демо-данных, если файл отсутствует."""
+    np.random.seed(RNG_SEED)
+    n = 5000
+    ts = np.arange(1600000000, 1600000000 + n * 60, 60)
+    cam_ids = np.random.choice(range(1, 101), size=n)
+    veh = np.random.poisson(lam=40, size=n).clip(0, 200)
+    wait = np.random.exponential(scale=25, size=n).clip(0, 400)
+    viol_r = np.random.beta(a=0.5, b=2, size=n).clip(0, 1)
+    cong = np.random.normal(loc=50, scale=20, size=n).clip(0, 100)
+    df = pd.DataFrame({'ts': ts, 'cam_id': cam_ids, 'veh': veh,
+                       'wait': wait, 'viol_r': viol_r, 'cong': cong})
+    df.to_csv(CSV_FILE, index=False)
+    print(f"Сгенерирован демо-файл {CSV_FILE}")
+
+def load_and_prepare():
+    global df_raw
+    if not os.path.exists(CSV_FILE):
+        print(f"Файл {CSV_FILE} не найден, генерирую демо-данные...")
+        generate_demo_data()
+    df = pd.read_csv(CSV_FILE)
+    print(f"Загружено строк: {len(df)}")
+
+    # Очистка по варианту
+    df['veh'] = df['veh'].clip(lower=0)
+    df['wait'] = df['wait'].clip(lower=0)
+    df['viol_r'] = df['viol_r'].clip(0, 1)
+    df = df.dropna(subset=['veh', 'wait', 'cong'], how='all').reset_index(drop=True)
+
+    # Категориальные признаки
+    df['datetime'] = pd.to_datetime(df['ts'], unit='s')
+    df['hour'] = df['datetime'].dt.hour.astype('int8')
+    df['day_of_week'] = df['datetime'].dt.dayofweek.astype('int8')
+    def shift(h):
+        if 6 <= h < 12: return 'morning'
+        if 12 <= h < 18: return 'day'
+        if 18 <= h < 23: return 'evening'
+        return 'night'
+    df['shift'] = df['hour'].apply(shift).astype('category')
+    # Категория загруженности (по квантилям)
+    q33, q66 = df['cong'].quantile([0.33, 0.66])
+    df['cong_cat'] = pd.cut(df['cong'], bins=[-np.inf, q33, q66, np.inf],
+                            labels=['low', 'medium', 'high']).astype('category')
+    df['veh_bin'] = pd.cut(df['veh'], bins=3, labels=['low', 'medium', 'high'])
+    df['cam_id'] = df['cam_id'].astype('category')
+    df_raw = df
+    return df
+
+# ======================== ФИЛЬТРАЦИЯ ========================
+def filter_by_cam(df, cam_val):
+    if cam_val == "Все":
+        return df.copy()
+    return df[df['cam_id'] == int(cam_val)].copy()
+
+# ======================== ГРАФИКИ С НОВЫМИ ЦВЕТАМИ ========================
+def clear_figure():
+    fig.clear()
+
+def plot_line():
+    global current_chart
+    current_chart = "line"
+    clear_figure()
+    data = filter_by_cam(df_raw, var_cam.get())
+    if len(data) == 0:
+        _draw_empty("Нет данных")
+        return
+    agg = var_agg.get()
+    rule = var_resample.get()
+    smoothed = var_smoothing.get()
+    grouped = data.set_index('datetime')['wait'].resample(rule).agg(agg).dropna()
+    if smoothed and len(grouped) > 5:
+        window = max(3, len(grouped)//10)
+        grouped = grouped.rolling(window, min_periods=1).mean()
+    ax = fig.add_subplot(111)
+    ax.plot(grouped.index, grouped.values, marker='o', color=ACCENT_COLOR, linewidth=2, markersize=4)
+    ax.set_title(f"Динамика {agg} времени ожидания ({rule})", color='white')
+    ax.set_xlabel("Дата/время", color='white')
+    ax.set_ylabel("Время ожидания, с", color='white')
+    ax.tick_params(colors='white')
+    ax.grid(True, alpha=0.3)
+    fig.patch.set_facecolor('#2a2a3a')
+    ax.set_facecolor('#1e1e2e')
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    canvas.draw_idle()
+
+def plot_bar():
+    global current_chart
+    current_chart = "bar"
+    clear_figure()
+    data = filter_by_cam(df_raw, var_cam.get())
+    if len(data) == 0:
+        _draw_empty("Нет данных")
+        return
+    agg = var_agg.get()
+    pivot = data.pivot_table(values='wait', index='shift', columns='cong_cat', aggfunc=agg, fill_value=0)
+    ax = fig.add_subplot(111)
+    pivot.plot(kind='bar', ax=ax, colormap='viridis', edgecolor='white')
+    ax.set_title(f"{agg} времени ожидания по сменам и загруженности", color='white')
+    ax.set_xlabel("Смена", color='white')
+    ax.set_ylabel(f"{agg} wait, с", color='white')
+    ax.tick_params(colors='white')
+    ax.legend(title="Загруженность", facecolor='#2a2a3a', labelcolor='white')
+    fig.patch.set_facecolor('#2a2a3a')
+    ax.set_facecolor('#1e1e2e')
+    fig.tight_layout()
+    canvas.draw_idle()
+
+def plot_scatter():
+    global current_chart
+    current_chart = "scatter"
+    clear_figure()
+    data = filter_by_cam(df_raw, var_cam.get())
+    if len(data) == 0:
+        _draw_empty("Нет данных")
+        return
+    if len(data) > 3000:
+        data = data.sample(3000, random_state=RNG_SEED)
+    ax = fig.add_subplot(111)
+    sns.scatterplot(data=data, x='veh', y='wait', hue='cong_cat', ax=ax, alpha=0.7, palette='Set2')
+    ax.set_title("Зависимость wait от veh (цвет – загруженность)", color='white')
+    ax.set_xlabel("Количество машин", color='white')
+    ax.set_ylabel("Время ожидания, с", color='white')
+    ax.tick_params(colors='white')
+    ax.legend(facecolor='#2a2a3a', labelcolor='white')
+    fig.patch.set_facecolor('#2a2a3a')
+    ax.set_facecolor('#1e1e2e')
+    fig.tight_layout()
+    canvas.draw_idle()
+
+def plot_heatmap():
+    global current_chart
+    current_chart = "heatmap"
+    clear_figure()
+    data = filter_by_cam(df_raw, var_cam.get())
+    if len(data) == 0:
+        _draw_empty("Нет данных")
+        return
+    agg = var_agg.get()
+    pivot = data.pivot_table(values='wait', index='day_of_week', columns='hour', aggfunc=agg, fill_value=0)
+    ax = fig.add_subplot(111)
+    sns.heatmap(pivot, annot=False, cmap='coolwarm', ax=ax,
+                cbar_kws={'label': f'{agg} wait (с)'})
+    ax.set_title(f"{agg} времени ожидания по дням и часам", color='white')
+    ax.set_xlabel("Час", color='white')
+    ax.set_ylabel("День недели (0=пн, 6=вс)", color='white')
+    ax.tick_params(colors='white')
+    fig.patch.set_facecolor('#2a2a3a')
+    ax.set_facecolor('#1e1e2e')
+    fig.tight_layout()
+    canvas.draw_idle()
+
+def plot_hist():
+    global current_chart
+    current_chart = "hist"
+    clear_figure()
+    data = filter_by_cam(df_raw, var_cam.get())
+    if len(data) == 0:
+        _draw_empty("Нет данных")
+        return
+    ax = fig.add_subplot(111)
+    sns.histplot(data=data, x='wait', hue='shift', multiple='stack', bins=30, ax=ax, palette='Set1')
+    ax.set_title("Распределение wait по сменам", color='white')
+    ax.set_xlabel("Время ожидания, с", color='white')
+    ax.set_ylabel("Частота", color='white')
+    ax.tick_params(colors='white')
+    ax.legend(facecolor='#2a2a3a', labelcolor='white')
+    fig.patch.set_facecolor('#2a2a3a')
+    ax.set_facecolor('#1e1e2e')
+    fig.tight_layout()
+    canvas.draw_idle()
+
+def _draw_empty(msg):
+    ax = fig.add_subplot(111)
+    ax.text(0.5, 0.5, msg, ha='center', va='center', fontsize=14, color='gray', transform=ax.transAxes)
+    ax.set_xticks([]); ax.set_yticks([])
+    canvas.draw_idle()
+
+# ======================== ОБРАБОТЧИКИ ========================
+def redraw_current(*args):
+    if current_chart == "line": plot_line()
+    elif current_chart == "bar": plot_bar()
+    elif current_chart == "scatter": plot_scatter()
+    elif current_chart == "heatmap": plot_heatmap()
+    elif current_chart == "hist": plot_hist()
+    else: plot_line()
+
+def set_chart(name):
+    global current_chart
+    current_chart = name
+    redraw_current()
+
+def refresh_data():
+    global df_raw
+    df_raw = load_and_prepare()
+    redraw_current()
+
+def export_plot():
+    path = filedialog.asksaveasfilename(defaultextension=".png",
+                                         filetypes=[("PNG", "*.png"), ("PDF", "*.pdf")])
+    if path:
+        fig.savefig(path, dpi=300, bbox_inches='tight')
+        messagebox.showinfo("Экспорт", f"Сохранён: {path}")
+
+# ======================== ГЛАВНОЕ ОКНО ========================
+def main():
+    global var_cam, var_agg, var_resample, var_smoothing, canvas, df_raw
+    df_raw = load_and_prepare()
+    cams = ["Все"] + [str(c) for c in sorted(df_raw['cam_id'].unique())]
+
+    root = tk.Tk()
+    root.title(f"Дашборд трафика – Вариант {VARIANT}")
+    root.geometry("1280x850")
+    root.configure(bg=BG_COLOR)
+
+    # Настройка стилей ttk (Combobox)
+    style = ttk.Style()
+    style.theme_use('clam')
+    style.configure("TCombobox", fieldbackground=FRAME_BG, background=FRAME_BG, foreground=TEXT_COLOR, arrowcolor=ACCENT_COLOR)
+    style.map("TCombobox", fieldbackground=[('readonly', FRAME_BG)])
+
+    # Панель фильтров
+    filter_frame = tk.Frame(root, bg=FRAME_BG, pady=5, relief=tk.RIDGE, bd=2)
+    filter_frame.pack(fill=tk.X, padx=10, pady=5)
+
+    tk.Label(filter_frame, text="Камера:", bg=FRAME_BG, fg=TEXT_COLOR, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=8)
+    var_cam = tk.StringVar(value="Все")
+    cam_combo = ttk.Combobox(filter_frame, textvariable=var_cam, values=cams, state="readonly", width=8)
+    cam_combo.pack(side=tk.LEFT, padx=5)
+    cam_combo.bind("<<ComboboxSelected>>", redraw_current)
+
+    tk.Label(filter_frame, text="Агрегация:", bg=FRAME_BG, fg=TEXT_COLOR, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(20,5))
+    var_agg = tk.StringVar(value="mean")
+    for t, v in [("Среднее","mean"), ("Максимум","max")]:
+        rb = tk.Radiobutton(filter_frame, text=t, variable=var_agg, value=v,
+                            bg=FRAME_BG, fg=TEXT_COLOR, selectcolor=ACCENT_COLOR,
+                            activebackground=FRAME_BG, activeforeground=ACCENT_COLOR,
+                            font=("Segoe UI", 9), command=redraw_current)
+        rb.pack(side=tk.LEFT, padx=4)
+
+    tk.Label(filter_frame, text="Период:", bg=FRAME_BG, fg=TEXT_COLOR, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(20,5))
+    var_resample = tk.StringVar(value="D")
+    res_combo = ttk.Combobox(filter_frame, textvariable=var_resample, values=["D","W","ME","YE"], state="readonly", width=5)
+    res_combo.pack(side=tk.LEFT, padx=5)
+    res_combo.bind("<<ComboboxSelected>>", redraw_current)
+
+    var_smoothing = tk.BooleanVar(value=False)
+    chk = tk.Checkbutton(filter_frame, text="Сглаживание (скользящее среднее)", variable=var_smoothing,
+                         bg=FRAME_BG, fg=TEXT_COLOR, selectcolor=FRAME_BG,
+                         activebackground=FRAME_BG, activeforeground=ACCENT_COLOR,
+                         font=("Segoe UI", 9), command=redraw_current)
+    chk.pack(side=tk.LEFT, padx=(20,5))
+
+    # Фрейм для графика
+    plot_frame = tk.Frame(root, bg="#000000", relief=tk.SUNKEN, bd=2)
+    plot_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+    canvas = FigureCanvasTkAgg(fig, master=plot_frame)
+    canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+    toolbar = NavigationToolbar2Tk(canvas, plot_frame)
+    toolbar.update()
+    toolbar.pack(side=tk.TOP, fill=tk.X)
+
+    # Кнопки графиков
+    ctrl_frame = tk.Frame(root, bg=BG_COLOR, pady=5)
+    ctrl_frame.pack(fill=tk.X, padx=10, pady=5)
+
+    buttons = [
+        ("📈 Линейный", "line", "#4caf50"),
+        ("📊 Столбчатый", "bar", "#1e88e5"),
+        ("🔵 Точечный", "scatter", "#ff9800"),
+        ("🔥 Тепловая карта", "heatmap", "#9c27b0"),
+        ("📊 Гистограмма", "hist", "#26a69a")
+    ]
+    for label, name, color in buttons:
+        btn = tk.Button(ctrl_frame, text=label, command=lambda n=name: set_chart(n),
+                        bg=color, fg="white", width=14, relief=tk.RAISED, bd=2,
+                        font=("Segoe UI", 9, "bold"), activebackground=BUTTON_ACTIVE)
+        btn.pack(side=tk.LEFT, padx=4)
+
+    tk.Button(ctrl_frame, text="🔄 Обновить", command=refresh_data,
+              bg="#607d8b", fg="white", width=12, relief=tk.RAISED,
+              font=("Segoe UI", 9, "bold")).pack(side=tk.RIGHT, padx=4)
+    tk.Button(ctrl_frame, text="💾 Экспорт", command=export_plot,
+              bg="#795548", fg="white", width=12, relief=tk.RAISED,
+              font=("Segoe UI", 9, "bold")).pack(side=tk.RIGHT, padx=4)
+
+    plot_line()
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
